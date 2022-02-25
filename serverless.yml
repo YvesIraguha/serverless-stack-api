@@ -15,14 +15,6 @@ provider:
   runtime: nodejs12.x
   stage: prod
   region: us-east-1
-
-  # To load environment variables externally
-  # rename env.example to .env and uncomment
-  # the following line. Also, make sure to not
-  # commit your .env.
-  #
-  #environment:
-  #  SAMPLE_ENV_VAR: ${env:SAMPLE_ENV_VAR}
   environment:
     tableName: notes
   iamRoleStatements:
@@ -80,3 +72,130 @@ functions:
           authorizer: aws_iam
 resources:
   - ${file(resources/api-gateway-errors.yml)}
+  CognitoNotesUserPool:
+    Type: AWS::Cognito::UserPool
+      Properties: 
+        AdminCreateUserConfig: 
+          AllowAdminCreateUserOnly: false
+        AliasAttributes: 
+          - String
+        AutoVerifiedAttributes: 
+          - email
+        Schema:
+          - AttributeDataType: "String"
+            DeveloperOnlyAttribute: false
+            Mutable: true
+            Name: "email"
+            Required: true
+          - AttributeDataType: "String"
+            DeveloperOnlyAttribute: false
+            Mutable: true
+            Name: "preferred_username"
+            Required: false
+        UsernameAttributes: 
+          - 'email'
+        UsernameConfiguration: 
+          CaseSensitive: false
+        UserPoolName: NoteUserPool
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      # Generate an app client name based on the stage
+      ClientName: notes-user-pool-client
+      UserPoolId:
+        Ref: CognitoNotesUserPool
+      ExplicitAuthFlows:
+        - ADMIN_NO_SRP_AUTH
+      GenerateSecret: false
+
+  CognitoNotesIdentityPool:
+    Type: AWS::Cognito::IdentityPool
+      Properties: 
+        AllowClassicFlow: true
+        AllowUnauthenticatedIdentities: false
+        CognitoEvents: Json
+        CognitoIdentityProviders: 
+          - ClientId: !Ref CognitoNotesUserPool
+            ProviderName: !GetAtt CognitoNotesUserPool.ProviderName
+            ServerSideTokenCheck: true
+        IdentityPoolName: NotesIdentityPool
+  CognitoNotesIdentityPoolRoles:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId:
+        Ref: CognitoNotesIdentityPool
+      Roles:
+        authenticated:
+          Fn::GetAtt: [CognitoNotesAuthRole, Arn]
+    # IAM role used for authenticated users
+  CognitoNotesAuthRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Federated: 'cognito-identity.amazonaws.com'
+            Action:
+              - 'sts:AssumeRoleWithWebIdentity'
+            Condition:
+              StringEquals:
+                'cognito-identity.amazonaws.com:aud':
+                  Ref: CognitoNotesIdentityPool
+              'ForAnyValue:StringLike':
+                'cognito-identity.amazonaws.com:amr': authenticated
+      Policies:
+        - PolicyName: 'CognitoAuthorizedPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'mobileanalytics:PutEvents'
+                  - 'cognito-sync:*'
+                  - 'cognito-identity:*'
+                Resource: '*'
+              
+              # Allow users to invoke our API
+              - Effect: 'Allow'
+                Action:
+                  - 'execute-api:Invoke'
+                Resource:
+                  Fn::Join:
+                    - ''
+                    -
+                      - 'arn:aws:execute-api:'
+                      - Ref: AWS::Region
+                      - ':'
+                      - Ref: AWS::AccountId
+                      - ':'
+                      - Ref: ApiGatewayRestApi
+                      - '/*'
+              
+              # Allow users to upload attachments to their
+              # folder inside our S3 bucket
+              # - Effect: 'Allow'
+              #   Action:
+              #     - 's3:*'
+              #   Resource:
+              #     - Fn::Join:
+              #       - ''
+              #       -
+              #         - Fn::GetAtt: [AttachmentsBucket, Arn]
+              #         - '/private/'
+              #         - '$'
+              #         - '{cognito-identity.amazonaws.com:sub}/*'
+Outputs:
+  userPoolId:
+    Value: !Ref CognitoNotesUserPool
+  userPoolProviderName:
+    Value: !GetAtt CognitoNotesUserPool.ProviderName
+  UserPoolClientId:
+    Value:
+      Ref: CognitoUserPoolClient
+  userPoolArn:
+    Value: !GetAtt CognitoNotesUserPool.Arn
+  identityPoolId:
+    Value: !Ref CognitoNotesIdentityPool
